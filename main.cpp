@@ -177,6 +177,7 @@ std::vector<int> getRepeatTract(std::vector<std::string> inputTriplets, std::str
 			}
 		}
 	}
+
 	return firstPassRange;
 }
 
@@ -199,30 +200,56 @@ std::vector<int> getCCTRepeatTract(std::vector<std::string> inputTriplets, std::
 		}
 	}
 
-	// Remove index in tract list if difference betwee idx > 1 (cct gaps unobserved)
-	int diff = 0; int flaggedIDX = 0;
-	for(int j = 0; j < cctTract.size(); j++){
-		if(j < cctTract.size()){
-			diff = std::abs(cctTract[j+1]-cctTract[j]);
+	// Loop over our CCT values.. remove wrongly added CCT outside tract
+	// while not at the end of the vector, check current index and following index
+	// calculate difference, flag if > 1 (CCT gapped regions never observed)
+	int idxDiff = 0; int flaggedIDX = 0;
+	std::vector<int>::const_iterator currItr, nextItr;
+	currItr = cctTract.begin();
+	while(currItr != cctTract.end()){
+		int currIndex = currItr - cctTract.begin();
+		nextItr = currItr;
+		if(++nextItr != cctTract.end()){
+			int nextIndex = nextItr - cctTract.begin();
+			idxDiff = std::abs(*nextItr - *currItr);
+			if(idxDiff > 1 and flaggedIDX == 0){
+				flaggedIDX = *nextItr;
+			}
 		}
-		if(diff > 1 and flaggedIDX == 0){
-			flaggedIDX = cctTract[j]+1;
-		}
+		std::advance(currItr,1);
 	}
 
-	std::cerr << '\n';
-	for(int index : cctTract){
-		std::cerr << index << std::endl;
+	// Delete the offending indices from our vector
+	for(int i=0; i < cctTract.size(); i++) {
+		if (flaggedIDX !=0 and cctTract[i] >= flaggedIDX){
+			cctTract.erase(cctTract.begin() + i);
+		}
 	}
-
-//	for (int index : cctTract) {
-//		if (flaggedIDX != 0 and index > flaggedIDX) {
-//			int pos = std::find(cctTract.begin(), cctTract.end(), index) - cctTract.begin();
-//			cctTract.erase(cctTract.begin() + pos);
-//		}
-//	}
 
 	return cctTract;
+}
+
+bool rotationCheck(std::string string1, std::string string2){
+
+	//String sizes
+	int size1 = string1.length();
+	int size2 = string2.length();
+
+	// If not the same, then invalid intv
+	if(size1 != size2){
+		return false;
+	}
+
+	// Double our known typical intervening to search for our matches
+	std::string temp = string1 + string1;
+
+	// If our input string is within double(string1) then a rotation of
+	// the typical intervening sequence exists, return true
+	if(temp.find(string2) != std::string::npos){
+		return true;
+	}else{
+		return false;
+	}
 }
 
 int scanReferenceReads(std::vector<individual_contig*> assemblyTargets){
@@ -257,13 +284,15 @@ int scanReferenceReads(std::vector<individual_contig*> assemblyTargets){
 		std::vector<std::string> intvPopulation;
 		std::vector<std::string> fpFlanks;
 		std::vector<std::string> tpFlanks;
-		std::vector<std::string> refCAG;
-		std::vector<std::string> refCCG;
-		std::vector<std::string> refCCT;
+		std::vector<int> refCAG;
+		std::vector<int> refCCG;
+		std::vector<int> refCCT;
 
 		// For every sequenceRead in this contig, get the aligned sequence
 		// Split into triplet sliding window list, remove any triplets that are < 3
 		for (std::string currentRead : investigateContig->getAlignedReadsVector()) {
+
+			std::cerr << "\n>>new read..." << std::endl;
 
 			// Vector of all substrings of this seqread
 			std::vector<std::string> sequenceWindows;
@@ -308,6 +337,7 @@ int scanReferenceReads(std::vector<individual_contig*> assemblyTargets){
 			std::vector<int> ccgTract = ccgTracts.front().second;
 
 			// CCT Masking/Intervening calculation
+			// Sort CCT / select most common again
 			std::string intvString; std::string fivePrimeFlankStr; std::string threePrimeFlankStr;
 			for (std::string mask : cctMasks){
 				int anchor = ccgTract.back();
@@ -316,38 +346,78 @@ int scanReferenceReads(std::vector<individual_contig*> assemblyTargets){
 				indvCCTPair = std::make_pair(mask, indvCCTResult);
 				cctTracts.push_back(indvCCTPair);
 
+			}
+			std::sort(cctTracts.begin(), cctTracts.end(), [](auto &left, auto &right){
+				return left.second.size() > right.second.size();
+			});
+			std::vector<int> cctTract = cctTracts.front().second;
+
+			// Create range for intervening sequence (i.e. range between CAG.back and CCG.front)
+			// Skip if malloc thrown (CAG[-1] idx > CCG[0] idx from bad quality read)
+			int cagSuffix; int ccgPrefix; int intvSize;
+			try{
+				cagSuffix = cagTract.back() + 1;
+				ccgPrefix = ccgTract.front();
+				intvSize = ccgPrefix - cagSuffix;
+			}catch(Exception const & e){;}
+			std::vector<int> interveningRange(std::abs(intvSize));
+			std::iota(interveningRange.begin(), interveningRange.end(), cagSuffix);
 
 
+			// Create range for FP flank
+			int cagPrefix;
+			try{
+				cagPrefix = cagTract.front() - 1;
+			}catch(Exception const & e){;}
+			std::vector<int> fivePrimeRange(abs(cagPrefix));
+			std::iota(fivePrimeRange.begin(), fivePrimeRange.end(), 0);
 
+			//Create a range for TP flank
+			int cctSuffix; int readEnd; int threePrimeSize;
+			try{
+				if(cctTract.size() != 0){
+					cctSuffix = cctTract.back() + 1;
+					readEnd = sequenceWindows.size();
+					threePrimeSize = readEnd - cctSuffix;
+				}
+			}catch(Exception const & e){;}
+			std::vector<int> threePrimeRange(std::abs(threePrimeSize));
+			std::iota(threePrimeRange.begin(), threePrimeRange.end(), cctSuffix);
 
+			// Append lengths to contig-run
+			refCAG.push_back(cagTract.size());
+			refCCG.push_back(ccgTract.size());
+			refCCT.push_back(cctTract.size());
 
-
-
-
-
-
-
-
-
-
-
-
+			// Count FP, TP and intervening occurrences
+			for(int i = 0; i < sequenceWindows.size(); i++){
+				if(std::find(fivePrimeRange.begin(), fivePrimeRange.end(), i) != fivePrimeRange.end()){
+					fivePrimeFlankStr += sequenceWindows[i];
+				}
+				if(std::find(threePrimeRange.begin(), threePrimeRange.end(), i) != threePrimeRange.end()){
+					threePrimeFlankStr += sequenceWindows[i];
+				}
+				if(std::find(interveningRange.begin(), interveningRange.end(), i) != interveningRange.end()){
+					intvString += sequenceWindows[i];
+				}
 			}
 
+			// Check INTV structure
+			std::string typicalIntv = "CAACAGCCGCCA";
+			bool substringPresence = rotationCheck(typicalIntv, intvString);
+			if(substringPresence){
+				intvString = "CAACAGCCGCCA";
+			}
+			if (intvString != "CAACAGCCGCCA"){
+				atypicalCount += 1;
+			}else{
+				typicalCount +=1;
+			}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+			// Append strings to relevant tract
+			fpFlanks.push_back(fivePrimeFlankStr);
+			tpFlanks.push_back(threePrimeFlankStr);
+			intvPopulation.push_back(intvString);
 
 
 
